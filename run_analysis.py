@@ -338,6 +338,97 @@ def run_responder_analysis(
 
 
 
+def run_longitudinal_trajectories(conn: sqlite3.Connection) -> None:
+    """Write outputs/longitudinal_trajectories.csv: mean % per population/timepoint/response/condition."""
+    from collections import defaultdict
+
+    rows = conn.execute("""
+        SELECT
+            sa.time_from_treatment_start AS timepoint,
+            sub.response,
+            sub.condition,
+            cc.population,
+            CAST(cc.count AS REAL) * 100.0 / SUM(cc.count) OVER (PARTITION BY cc.sample_id) AS percentage
+        FROM samples sa
+        JOIN subjects sub ON sa.subject_id = sub.subject_id
+        JOIN cell_counts cc ON sa.sample_id = cc.sample_id
+        WHERE sub.treatment = 'CPI-7'
+          AND sa.sample_type = 'PBMC'
+          AND sub.response IN ('yes', 'no')
+        ORDER BY sa.time_from_treatment_start, sub.response, sub.condition, cc.population
+    """).fetchall()
+
+    if not rows:
+        raise RuntimeError("No data found for longitudinal trajectories. Check CPI-7 / PBMC filters.")
+
+    sums: dict[tuple, float] = defaultdict(float)
+    counts: dict[tuple, int] = defaultdict(int)
+    for row in rows:
+        key = (row["timepoint"], row["response"], row["condition"], row["population"])
+        sums[key] += row["percentage"]
+        counts[key] += 1
+
+    records = [
+        {
+            "timepoint": tp,
+            "response": resp,
+            "condition": cond,
+            "population": pop,
+            "mean_percentage": round(sums[(tp, resp, cond, pop)] / counts[(tp, resp, cond, pop)], 6),
+        }
+        for (tp, resp, cond, pop) in sorted(sums)
+    ]
+
+    out_path = OUTPUTS_DIR / "longitudinal_trajectories.csv"
+    with out_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=["timepoint", "response", "condition", "population", "mean_percentage"]
+        )
+        writer.writeheader()
+        writer.writerows(records)
+
+    print(f"[Longitudinal trajectories] {out_path} written ({len(records)} rows)")
+
+
+def run_study_overview(conn: sqlite3.Connection) -> None:
+    """Write outputs/study_overview.csv (summary) and outputs/study_breakdown.csv (per-condition)."""
+    summary_row = conn.execute("""
+        SELECT
+            COUNT(*)                                                              AS total_subjects,
+            COUNT(DISTINCT condition)                                             AS n_studies,
+            SUM(CASE WHEN response = 'yes' THEN 1 ELSE 0 END)                    AS n_responders,
+            ROUND(100.0 * SUM(CASE WHEN response = 'yes' THEN 1 ELSE 0 END) / COUNT(*), 1) AS response_rate_pct
+        FROM subjects
+        WHERE treatment = 'CPI-7'
+    """).fetchone()
+
+    summary_path = OUTPUTS_DIR / "study_overview.csv"
+    with summary_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["total_subjects", "n_studies", "n_responders", "response_rate_pct"])
+        writer.writeheader()
+        writer.writerow(dict(summary_row))
+    print(f"[Study overview] {summary_path} written")
+
+    breakdown_rows = conn.execute("""
+        SELECT
+            condition,
+            COUNT(*)                                                 AS n_subjects,
+            SUM(CASE WHEN response = 'yes' THEN 1 ELSE 0 END)       AS n_responders,
+            SUM(CASE WHEN response = 'no'  THEN 1 ELSE 0 END)       AS n_non_responders
+        FROM subjects
+        WHERE treatment = 'CPI-7'
+        GROUP BY condition
+        ORDER BY condition
+    """).fetchall()
+
+    breakdown_path = OUTPUTS_DIR / "study_breakdown.csv"
+    with breakdown_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["condition", "n_subjects", "n_responders", "n_non_responders"])
+        writer.writeheader()
+        writer.writerows([dict(r) for r in breakdown_rows])
+    print(f"[Study overview] {breakdown_path} written")
+
+
 def run_baseline_cohort_summary(conn: sqlite3.Connection) -> None:
     """Write outputs/baseline_cohort_summary.csv: all CPI-7 + PBMC subjects at day 0, both conditions."""
     rows = conn.execute("""
@@ -400,6 +491,8 @@ def main() -> None:
         for time_filter in ("all", *VALID_TIMEPOINTS):
             run_responder_analysis(conn, time_filter)
         run_baseline_cohort_summary(conn)
+        run_longitudinal_trajectories(conn)
+        run_study_overview(conn)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,9 @@ RESPONDER_CSV_TMPL = RESPONDER_DIR / "responder_differential_analysis_time_{labe
 RESPONDER_PNG_TMPL = RESPONDER_DIR / "responder_stratification_boxplot_time_{label}.png"
 
 BASELINE_CSV = OUTPUTS_DIR / "baseline_cohort_summary.csv"
+LONGITUDINAL_CSV = OUTPUTS_DIR / "longitudinal_trajectories.csv"
+OVERVIEW_CSV = OUTPUTS_DIR / "study_overview.csv"
+BREAKDOWN_CSV = OUTPUTS_DIR / "study_breakdown.csv"
 
 # ---------------------------------------------------------------------------
 # Streamlit page config
@@ -88,39 +91,57 @@ def _responder_headline(df: pd.DataFrame, label: str) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_overview, tab_frequencies, tab_responder, tab_baseline = st.tabs(
-    ["Overview", "Population Frequencies", "Responder Analysis", "Baseline Cohort"]
+tab_overview, tab_frequencies, tab_responder, tab_baseline, tab_longitudinal = st.tabs(
+    ["Overview", "Population Frequencies", "Responder Analysis", "Baseline Cohort", "Longitudinal Trajectories"]
 )
 
 # ---------------------------------------------------------------------------
 # Overview
 # ---------------------------------------------------------------------------
 with tab_overview:
-    st.subheader("How to use this dashboard")
-
     st.markdown(
-        """
-This dashboard presents immune cell population analysis results from the clinical trial dataset.
-
-- **Population Frequencies**
-  Shows the per-sample relative frequency (%) for each immune population.
-
-- **Responder Analysis**
-  Compares responders vs non-responders across both conditions (**melanoma** and **NSCLC**) treated with **CPI-7**, PBMC samples only, using Mann–Whitney U tests and Benjamini–Hochberg correction.
-
-- **Baseline Cohort**
-  Shows the baseline subset for **melanoma + CPI-7 + PBMC at day 0**, including breakdowns by project, response, and sex.
-        """.strip()
+        "A multi-cohort clinical trial profiling peripheral blood immune cell populations "
+        "across melanoma and NSCLC patients treated with CPI-7, sampled at days 0, 7, and 14."
     )
 
-    st.divider()
-    st.subheader("Cohorts used in this analysis")
-    st.markdown(
-        """
-- **Responder Analysis cohort**: CPI-7 treatment + PBMC sample type (melanoma and NSCLC)
-- **Baseline Cohort filter**: CPI-7 + PBMC, baseline only (time_from_treatment_start = 0)
-        """.strip()
-    )
+    if not _safe_exists(OVERVIEW_CSV) or not _safe_exists(BREAKDOWN_CSV):
+        st.warning("Missing overview outputs. Run `make pipeline`.")
+    else:
+        summary = _read_csv(OVERVIEW_CSV).iloc[0]
+        df_breakdown = _read_csv(BREAKDOWN_CSV)
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Subjects", int(summary["total_subjects"]))
+        c2.metric("Studies", int(summary["n_studies"]))
+        c3.metric("Response rate", f"{summary['response_rate_pct']:.0f}%")
+
+        st.divider()
+        st.subheader("Headline finding")
+        st.info("CD8 T cells at baseline are elevated in responders.")
+
+        st.divider()
+        st.subheader("Study breakdown")
+        st.dataframe(
+            df_breakdown.rename(columns={
+                "condition": "Condition",
+                "n_subjects": "Subjects",
+                "n_responders": "Responders",
+                "n_non_responders": "Non-responders",
+            }),
+            hide_index=True,
+            width="stretch",
+        )
+
+        st.divider()
+        with st.expander("How to use this dashboard"):
+            st.markdown(
+                """
+- **Population Frequencies** — per-sample relative frequency (%) for each immune population.
+- **Responder Analysis** — Mann–Whitney U + BH-corrected comparison of responders vs non-responders (CPI-7 / PBMC).
+- **Baseline Cohort** — CPI-7 + PBMC subjects at day 0, with breakdowns by project, response, and sex.
+- **Longitudinal Trajectories** — mean immune population percentages across days 0, 7, 14 by response group.
+                """.strip()
+            )
 
 # ---------------------------------------------------------------------------
 # Population Frequencies
@@ -147,7 +168,7 @@ Relative frequency is reported as a percentage of total cells in that sample.
         )
 
         df_view = df_freq[df_freq["population"].isin(selected_pops)] if selected_pops else df_freq
-        st.dataframe(df_view, hide_index=True, use_container_width=True)
+        st.dataframe(df_view, hide_index=True, width="stretch")
 
 # ---------------------------------------------------------------------------
 # Responder Analysis
@@ -208,7 +229,7 @@ across melanoma and NSCLC patients treated with **CPI-7**, using **PBMC** sample
             if "q_value" in show_df.columns:
                 show_df["q_value"] = show_df["q_value"].map(lambda x: f"{float(x):.6f}")
 
-            st.dataframe(show_df, hide_index=True, use_container_width=True)
+            st.dataframe(show_df, hide_index=True, width="stretch")
 
 # ---------------------------------------------------------------------------
 # Baseline Cohort
@@ -242,7 +263,7 @@ across both melanoma and NSCLC conditions.
                 .rename_axis("project")
                 .reset_index(name="samples")
             )
-            st.dataframe(proj_tbl, hide_index=True, use_container_width=True)
+            st.dataframe(proj_tbl, hide_index=True, width="stretch")
 
         with col_resp:
             st.caption("Subjects by response")
@@ -253,7 +274,7 @@ across both melanoma and NSCLC conditions.
                 .rename_axis("response")
                 .reset_index(name="subjects")
             )
-            st.dataframe(resp_tbl, hide_index=True, use_container_width=True)
+            st.dataframe(resp_tbl, hide_index=True, width="stretch")
 
         with col_sex:
             st.caption("Subjects by sex")
@@ -264,7 +285,51 @@ across both melanoma and NSCLC conditions.
                 .rename_axis("sex")
                 .reset_index(name="subjects")
             )
-            st.dataframe(sex_tbl, hide_index=True, use_container_width=True)
+            st.dataframe(sex_tbl, hide_index=True, width="stretch")
 
         with st.expander("View full baseline sample list"):
-            st.dataframe(df_base, hide_index=True, use_container_width=True)
+            st.dataframe(df_base, hide_index=True, width="stretch")
+
+# ---------------------------------------------------------------------------
+# Longitudinal Trajectories
+# ---------------------------------------------------------------------------
+with tab_longitudinal:
+    st.subheader("Longitudinal Immune Trajectories (CPI-7 / PBMC)")
+    st.markdown(
+        "Mean percentage of each immune population at days 0, 7, and 14, "
+        "split by responder status across CPI-7-treated PBMC samples."
+    )
+
+    if not _safe_exists(LONGITUDINAL_CSV):
+        st.warning("Missing `outputs/longitudinal_trajectories.csv`. Run `make pipeline`.")
+    else:
+        df_traj = _read_csv(LONGITUDINAL_CSV)
+
+        condition_filter = st.selectbox(
+            "Condition",
+            options=["both", "melanoma", "nsclc"],
+            index=0,
+            key="longitudinal_condition",
+        )
+
+        if condition_filter == "both":
+            df_plot = df_traj.groupby(
+                ["timepoint", "response", "population"], as_index=False
+            )["mean_percentage"].mean()
+        else:
+            df_plot = df_traj[df_traj["condition"] == condition_filter].copy()
+
+        populations = sorted(df_plot["population"].unique())
+        cols = st.columns(3)
+        for i, pop in enumerate(populations):
+            with cols[i % 3]:
+                df_pop = df_plot[df_plot["population"] == pop]
+                df_chart = (
+                    df_pop.pivot(index="timepoint", columns="response", values="mean_percentage")
+                    .sort_index()
+                    .rename(columns={"yes": "Responders", "no": "Non-responders"})
+                )
+                df_chart.index.name = "Day"
+                df_chart.columns.name = None
+                st.caption(pop.replace("_", " ").title())
+                st.line_chart(df_chart)
