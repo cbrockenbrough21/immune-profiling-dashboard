@@ -1,0 +1,1 @@
+Average b_cell count for melanoma male responders at baseline (time=0): 7957.67

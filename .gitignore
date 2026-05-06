@@ -1,6 +1,5 @@
 # Generated database and pipeline outputs
 *.db
-outputs/
 data/
 
 # Python
